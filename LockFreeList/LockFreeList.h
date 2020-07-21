@@ -11,10 +11,7 @@
 
     最低位bit为1标识无效---毕竟0标识正常的地址
     倒数第二位给LruRef
-    预计要留1bit来应对aba问题
-    ---aba问题用hp处理
     由于上层需要引用计数来标识节点是否能删除;lru计数来处理lru;需要拿64位地址高8位来实现这个功能
-    ---给next加了新的含义,那么cas失败就多了原因了
     ---看看能不能吧lruRef同ref合并下---可以,引用时0跳2,其余情况正常加减1---其实应该想到的,这俩值其实在cas时都是协同行动的,先不动吧,规范些
 
     hp处理的是aba问题和多线程共享结构删除问题,有多个cas的第一参数引用的结构和多个线程共享的结构不能随意清除
@@ -30,11 +27,9 @@
 
 using namespace std;
 
-//原来那几个0都是F,造成了core,版本迭代时相关更改不彻底---最后一个C是E,都错了
 #define GET_NEXT_NODE_ADDRESS(p) ( (Node*)( (unsigned long)((p->next).load()) & 0x0000FFFFFFFFFFFC ) )
 #define GET_NODE_ADDRESS(p) ( (Node*)( (unsigned long)(p) & 0x0000FFFFFFFFFFFC ) )
 
-//#define isValid(p) ( !((unsigned long)( ((p)->next).load() ) & 0x0000000000000001) )
 #define getRef(p) ( ((unsigned long)( ((p)->next).load() ) & 0xFF00000000000000) >> 56 )
 #define getLruRef(p) ( ( (unsigned long)( ((p)->next).load() ) & 0x0000000000000002 ) >> 1)
 
@@ -50,7 +45,6 @@ using namespace std;
 
 #define HP_OUT_REF_2 hp->outRef(1);hp->outRef(0);
 
-//要不要搞成单例类
 template<class T>
 class LockFreeList
 {   
@@ -119,18 +113,12 @@ class LockFreeList
 
                 if((n->t).key() == k)
                 {
-                    //cout << "thread "<< hp->getThreadId() << " find:" << k << endl;
-
-                    //加引用计数
-                    //单纯的插入删除这里是否会有问题
-                    //在测引用之前先去掉这条语句
                     if(ref)
                     {
                         if(incRef(n) == 0)
                         {
                             *pre = p;
                             *node = n;
-                            //cout << "list find addr:" << (unsigned long)n << endl;
                             return 0;
                         }   
         
@@ -141,7 +129,6 @@ class LockFreeList
 
                     *pre = p;
                     *node = n;
-                    //cout << "list find addr:" << (unsigned long)n << endl;
                     return 0;
                     
                 }
@@ -158,6 +145,7 @@ class LockFreeList
             p = n;
             n = GET_NEXT_NODE_ADDRESS(p);
 
+/*
             //这地方再做一次检查是不是就可以了,如果失效是不是可以认定已经被或者要被删除了,应该要重查
             //---注释下,此处是为了处理此种情况:我拿到的是无效节点p的下一个节点n,此时这个n是什么完全不确定
             //---其实也可以勉强往链上靠,毕竟还可能指向链,但指向节点可能也完了,要处理的情形比较复杂,简单化从头开始吧
@@ -169,6 +157,8 @@ class LockFreeList
                 n = GET_NEXT_NODE_ADDRESS(p);
                 continue;
             }
+            //再回来看下其实没必要,只要被检查节点处于有效状态就行
+*/
 
         }
 
@@ -190,25 +180,19 @@ class LockFreeList
         //---找到了,就算了
         do
         {
-            //插入重复元素的情况,靠我这个find的break来处理了
-            //---失效的情况,则只能空跑?
-            //if( !find((node->t).key(), &n, &pre) )break;
-
+            //不能完全信任find返回,在返回过程中可能有其他变数
+            //---下边的insert做了pre的next是否依然链接到n的检查
+            //------n的有效性在此不重要
             ret = find((node->t).key(), &n, &pre);
-
-            //cout << "thread " << hp->getThreadId() << " find " << (node->t).key() << " ret:" << ret << endl;
 
             if(ret == 0)break;
 
+            //不需要n参数了
             ret = insert(node, pre);
-
-            //cout << "inner insert ret:" << ret << endl;
         }
         while(ret);//ref的改变当然会引起这里的失败
 
-        //print();
-
-        //此处不能分开搞,我刚插进去,还没增加计数就删掉了
+        //插入和增加引计不能分开搞,我刚插进去,还没增加计数就删掉了
         //if(ref)incRef(node);
 
         return 0;
@@ -226,9 +210,6 @@ class LockFreeList
 
     int insert(Node* node, Node* before)
     {
-
-        //cout << "in insert:" << hp->getThreadId() << endl;
-
         hp->inRef(0, (void*)node);//这里node其实是不用挂hp的
         hp->inRef(1, (void*)before);
 
@@ -250,7 +231,9 @@ class LockFreeList
 
         (node->next).store(target);
         //要求find拿到的before一定要是小于node的
-        if(GET_NEXT_NODE_ADDRESS(node) && GET_NEXT_NODE_ADDRESS(node)->t.key() == node->t.key() )
+        //---要防止同样位置有其他节点插入的情况
+        //------有其他节点插入也不是不可以,只是依然要保持有序
+        if(GET_NEXT_NODE_ADDRESS(node) && GET_NEXT_NODE_ADDRESS(node)->t.key() <= node->t.key() )
         {
             HP_OUT_REF_2
             return -2;
@@ -282,18 +265,9 @@ class LockFreeList
         {
             ret = find(k, &node, &pre);
 
-            //cout << "thread " << hp->getThreadId() << " find " << k << " ret:" << ret << endl;
-
             if(ret != 0)break;
 
-
             ret = remove(node, pre);
-
-            //cout << "thread " << hp->getThreadId() << " remove , ret:" << ret << endl;
-
-            //cout << "thread " << hp->getThreadId() << " remove before:" << (unsigned long)pre << " node:" << (unsigned long)node << endl;
-            //cout << "thread " << hp->getThreadId() << " remove " << k << " ret:" << ret << endl;
-
         }
         //此处要求,节点已经不存在,你要返回失败
         //---即节点已经被别的线程删除了
@@ -301,7 +275,7 @@ class LockFreeList
         //应用计数变化引起的cas失败怎么处理---跟被其他线程删除流程是类似的,第二次循环时检测出失败
         while(ret != 0);
 
-        //hp->del((void*)node);
+        //hp->del((void*)node);回收内存的步骤不在这里做,由上层调用移除和回收
 
         //是不是任何情况下都可以返回0,毕竟不存在或是被别人删了,结果也是这个节点没有了
         return 0;
@@ -325,14 +299,12 @@ class LockFreeList
             return -1;
         }
 
-/*
         if(getRef(node) > 0)
         {
             HP_OUT_REF_2
             valid(node);
             return -5;
         }
-*/
 
         //后边的插入和删除都被杜绝了,所以next不用担心会被拒绝
         void *next = (node->next).load();
@@ -357,8 +329,6 @@ class LockFreeList
             return -3;
         }
 
-        //cout << "cas from:" << (unsigned long)tmp << " to " << (unsigned long)next << endl;
-
         void* addr;
         unsigned long need = (unsigned long)(tmp) & (0xFF00000000000003);//只取before我们需要的部分
         addr = (void*)(need | (unsigned long)next);
@@ -382,16 +352,12 @@ class LockFreeList
         Node* n = GET_NEXT_NODE_ADDRESS(p);
         while(n)
         {
-            //cout << "node " << (n->t).key();
-
             if( getRef(n) == 0 )
             {
-                //cout << " case 1" << endl;
                 if( getLruRef(n) == 0)
                 {
-                    //此处出现错误的情况,在于此点先被其他线程删除,再插入---考虑到只有一个线程回收,没这个问题
-                    //---这里暂时是remove唯一的使用场景了
-
+                    //此处出现错误的情况,在于此点先被其他线程删除,再插入
+                    //---考虑到只有一个线程回收,没这个问题
                     cout << "thread " << hp->getThreadId() << " write back:" << endl;
                     (n->t).writeBack();
                     remove( (n->t).key());
@@ -402,8 +368,6 @@ class LockFreeList
                 }
                 else if( getLruRef(n) == 1 )
                 {
-                    //cout << "declruref" << endl;
-
                     decLruRef(n);
 
                     p = n;
@@ -412,7 +376,6 @@ class LockFreeList
             }
             else
             {
-                //cout << "case 2" << endl;
                 p = n;
                 n = GET_NEXT_NODE_ADDRESS(n);
             }
@@ -474,12 +437,6 @@ class LockFreeList
     //连带着一起处理LruRef
     static int incRef(Node* node)
     {
-        /*
-        for(int i = 0; i < 5; i+=1)
-            cout << hex << ((unsigned long*)node)[i] << "|";
-        cout << endl;
-        */
-
         void* next;
         unsigned long bits, ref, lruRef;
         void* target;
@@ -520,12 +477,6 @@ class LockFreeList
             return -1;
         }
 
-        /*
-        for(int i = 0; i < 5; i+=1)
-            cout << hex << ((unsigned long*)node)[i] << "|";
-        cout << endl;
-        */
-
         return 0;
     };
 
@@ -552,8 +503,6 @@ class LockFreeList
             next = (node->next).load();
             bits = (unsigned long)next;
 
-            //cout <<"dec bits:" << hex << bits << endl;
-
             //降引用计数不涉及lru
             ref = getRefFromBits(bits);
             if(ref == 0)
@@ -574,8 +523,6 @@ class LockFreeList
         {
             return -1;
         }
-
-        //cout << "node " << (node->t).key() << dec << " dec ref from" << ref << " to " << getRefFromBits((unsigned long)target) << endl;
 
         return 0;
     };
@@ -635,13 +582,10 @@ class LockFreeList
     {
         int i = 0;
 
-        //cout << hex << (unsigned long)(&dummyHead) << endl;
-
         cout << "thread " << hp->getThreadId() << " print begin" << endl;
         Node* p = (Node*)( (dummyHead.next).load() );
         while(p)
         {
-            //cout << hex << (unsigned long)p << endl;
             cout << dec << i++ << ":" << (p->t).k << ":" << getRefFromBits( (p->next).load() ) << ":" << getLruRefFromBits( (p->next).load() ) << endl;
             p = GET_NEXT_NODE_ADDRESS(p);
         }

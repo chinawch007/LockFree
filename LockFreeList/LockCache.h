@@ -1,13 +1,3 @@
-/*
-    是指针,但指针没有比较函数---自己写个模板函数
-
-    先把功能实现了再优化吧,先直接T比较,之后再看看能不能type_traits
-
-    考虑下cache元素的内存管理,是由我初始化全部,还是有外部new,free---因为牵涉到无锁处理,较为麻烦
-
-    注意安排下变HP Node的回收,单线程操作
-*/
-
 #include <atomic>
 #include <iostream>
 #include <unistd.h>
@@ -21,8 +11,6 @@ using namespace std;
 #define CACHE_SIZE_LIMIT (10 * 1024)
 #define MAX_SIZE (20)
 
-//此时传过来的是cache的内部类
-//不过是做个中介,把工作都转给list实现而已
 template<class T>
 class HashTable
 {
@@ -43,7 +31,6 @@ class HashTable
                 table[i].init(hp);
             }
             
-
         };
 
         int hash(unsigned long k)
@@ -56,13 +43,11 @@ class HashTable
         {
             int i = hash(k);
             LockFreeList<T>& list = table[i];
-            //唉,这sb接口
+
             Node* pre = NULL;
             Node* n = NULL;
-            //这地方要加个ref?
-            int ret = list.find(k, &n, &pre, ref);
 
-            //list.print();
+            int ret = list.find(k, &n, &pre, ref);
 
             if(ret == 1)return NULL;
 
@@ -73,9 +58,6 @@ class HashTable
         {
             int i = hash((n->t).key());
             LockFreeList<T>& list = table[i];
-            //你愿意这么搞也行,就是说在hash层new,在hp层delete
-            //这样直接赋值有没有问题,还是说都用指针
-            //用指针就得由使用方控制内存,我这里类似于vector
 
             int ret = list.insert(n, ref);
 
@@ -83,15 +65,9 @@ class HashTable
             circle++;
             if(circle >= 2)
             {
-                //cout << "cache reclaim" << endl;
                 ret = 1;
                 circle = 0;
             }
-
-            /*由上层来启动回收
-            if(++itemSize > MAX_SIZE)
-                reclaim();
-            */
 
             return ret;
         };
@@ -107,7 +83,6 @@ class HashTable
         //这地方就深深地体现出哲学的矛盾之处,你这个功能放到cache层要处理HashTable的内部结构,放在这里却要使用cache层定义节点的成员函数
         //此处暂时是底层list唯一的删除场景了
         //超出一个限度值的时候调用,这个限度值要在我这里设置,不能在list中,毕竟他那边是单链
-        //
         int reclaim(int i)
         {
             LockFreeList<T>& list = table[i];
@@ -155,16 +130,10 @@ class HashTable
         int circle;
 };
 
-//T默认传void*啦---我这边是存元素好,还是存指针好
-
 //我发现有个根本性的问题我搞错了...你存储的是void*,这没问题,但你查询时候用的是文件内偏移,即一个key值,这个key值不是void*生成的
 //多线程对cache这个整体管理Page的结构是多线程并发,但对于单个页的插入,写入是要做并发控制的---
 //我要么是对文件中所有位置的页做bit索引----要么是自己管理Node结构,在初始化时直接申请好全部内存,比较下---
 //你自己管理,多个线程插入一个页你怎么做调度呢?毕竟只能用pageNum来索引
-
-//如果这里只存指针,那么内存就需要外部来管理;我存实体,我管理内存,回收的时候我要负责delete
-//核心问题是多线程引用同一个item,可写
-//---看看这个部分怎么原子写
 
 //T表示元素,S标识元素的后备集合
 //T要有WriteBack,S要有getItem
@@ -182,11 +151,6 @@ class ClockCache
 
                 T t;
                 unsigned long k;
-
-                //如果两个引用计数合二为一,变化场景:
-                //---使用
-                //---释放
-                //---清理回收,
                 
                 bool dirty;
                 //第一个bit用于latch,剩下7bit用于version
@@ -194,8 +158,7 @@ class ClockCache
                 
                 void clear()
                 {
-                    //writeBack();
-                    t.clear();//让外部item类自己就在清理的时候回写吧
+                    t.clear();
                 };
 
                 void writeBack()
@@ -243,29 +206,13 @@ class ClockCache
         {
             typename LockFreeList<Node>::Node* p = table.find(k, true);
 
-            //cout << "in get find addr:" << hex << (unsigned long)(p) << endl;
-            //cout << "in get find bits:" << (unsigned long)((p->next).load()) << endl;
-
             if(!p)
             {
-                cout << "not find " << k << ", insert" << endl;
-
                 p = new typename LockFreeList<Node>::Node;
 
                 is.getItem(k, &((p->t).t), &((p->t).k));
 
-                /*
-                for(int i = 0; i < 5; i+=1)
-                    cout << hex << ((unsigned long*)p)[i] << "|";
-                cout << endl;
-                */
-
                 int ret = table.insert(p, true);//第一次插入当然是要引用的啦
-
-                cout << "after insert before reclaim " << endl;
-                table.table[0].print();
-
-                //cout << "in get insert ret:" << ret << endl;
 
                 if(ret == 1)
                 {
@@ -282,30 +229,14 @@ class ClockCache
         {
             typename LockFreeList<Node>::Node* p = table.find(k);
             //typename LockFreeList<T>::Node* p = table.find(k);
-
-            //可千万别没找到这个值
             
-            //cout << "in release find addr:" << hex << (unsigned long)(p) << endl;
-            //cout << "in release find bits:" << (unsigned long)((p->next).load()) << endl;
-
-            //这么写编译好使吗?
-
             int ret = LockFreeList<Node>::decRef((typename LockFreeList<Node>::Node*)p);
-            //cout << "in release dec ret:" << ret << endl;
         }
 
-
-        //暂时唯一的删除node的场景,单线程操作的话,删除倒是都能成功的.
-        //看下怎么控制只有一个线程来做删除
         //第一轮清理的时候会把ref=1变成0,所以说第二轮才会真正回收,想办法应对这种情况
-        //---先简单处理吧,不限制数目的话,瞬间扫过一次之后立即会再次调用的
-        //未必要限制回收node数目吧,扫一轮就可以了
-
+        //---把扫描触发的阀值设置的低些
         void reclaim()
         {
-            //cout << "cache reclaim" << endl;
-
-            //抢一个回收锁,线程结束后自己解锁
             bool b = reclaimLock.load();
             if(b) return;
 
