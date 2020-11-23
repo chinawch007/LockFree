@@ -22,18 +22,15 @@ class LockFreeQueue
 
         int pop(void* data, int& len);
 
-    //private:
         void* buffer;
         int bufferSize;
 
-        //多进程的话要从内存中取,多线程就可以单例搞了吗?---多进程的话就只当做是个临时变量了
-        //int head;
-        //int tail;
-
         atomic<int>* head;
         atomic<int>* tail;
-
-        //int dataSize;
+        //读线程原子增大head,抢到读部分缓冲区的权力,但可能没有读完的时候写线程来追尾了,
+        //---需要有个限制告知写线程它要写的缓冲区部分是否有线程在读
+        atomic<int>* headRead;
+        atomic<int>* inited;
 
         int shmId;
 };

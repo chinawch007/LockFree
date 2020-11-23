@@ -7,8 +7,6 @@
 
     我要搞个hash表,又不能用锁,无锁的就鸡生蛋蛋生鸡了...
     如果待回收结构统一管理的话,多线程又得加锁了
-
-    这个hp能否解决aba问题
 */
 
 //不用模板类,待回收的可认为都是指针
@@ -75,11 +73,19 @@ class HP
         return threadId;
     };
 
+    //对于郁白给的例子情形,目标地址更换可以简单的判断是否在获取过程中发生了删除
+    //---但对我这种删除模式来说,没法判断,只能是自己管理所有内存,对目标的内存进行判断是否已被回收
     int inRef(int i, void* p)
     {
         int tid = getThreadId();
 
         ref[tid][i] = p;
+    };
+
+    void* get(int i)
+    {
+        int tid = getThreadId();
+        return ref[tid][i];
     };
 
     //想了下这地方应该不涉及回收,回收是说我显式删除一个节点后,延迟free
@@ -141,7 +147,7 @@ class HP
                 {
                     if(ref[j][k] == freeList[tid][i])
                     {
-                        cout << "pointer is in use:" << ref[j][k] << endl;
+                        //cout << "pointer is in use:" << ref[j][k] << endl;
                         inUse = true;
                         break;
                     }
@@ -152,7 +158,7 @@ class HP
             if(!inUse)
             {
                 T* tmp = (T*)(freeList[tid][i]);
-                cout << "hp thread " << tid << " clear:" << (tmp->t).k << endl;
+                //cout << "hp thread " << tid << " clear:" << (tmp->t).k << endl;
                 tmp->clear();
                 freeList[tid][i] = NULL;
                 cntFree--;

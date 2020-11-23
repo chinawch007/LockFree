@@ -1,10 +1,4 @@
 /*
-    如果一个原子变量都不在多线程中出现,当然就不必发愁memory barrier的问题
-    在只有head和tail两个位置指针的情况下如何判定队列满是个问题
-    搞个标识是否满的变量,但没法跟tail,head一起原子操作
-    push:新tail位置等于head
-    pop:新head位置等于tail
-
     除了初始状态外,不允许在push后新tail大于等于head,在这种条件的约束下队列buffer中会留有小空隙;pop时,在head和tail相等的情况下返回空
 
     突然想到的,你刚改完tail,还没写完数据,其他线程来pop了该怎么办?---没想到这个问题,说明还是对数据复制和tail增加的原子性的必要性没理解号
@@ -15,6 +9,11 @@
 
     多进程测试---单进程可以用个单例,多进程的同步创建怎么搞啊---shmget可以看成是原子的,故而这是os的问题
     gperf测试---没啥搞头
+
+    核心矛盾在于,head的增加,表示获取了读的权力,但此时没有读完的情况下,写线程的tail可以占有这部分
+    ---当前读的时候会看是否写完,相应的,我们写的时候也应该看是否读完
+
+    //头部添加个标识共享内存是否已经初始化的变量
 */
 #include "LockFreeQueue.h"
 
@@ -27,49 +26,77 @@
 using namespace std;
 
 #define ATOMIC_INT_SIZE (sizeof(atomic<int>))
-#define DATA (buffer + 2 * ATOMIC_INT_SIZE)
-#define DATA_SIZE (bufferSize - 2 * ATOMIC_INT_SIZE)
+#define DATA (buffer + 4 * ATOMIC_INT_SIZE)
+#define DATA_SIZE (bufferSize - 4 * ATOMIC_INT_SIZE)
 
 #define WRITE_OVER_TOKEN (0xFFFFFFFF)
+#define INITED (0xFFFFFFFF)
 
 int LockFreeQueue::init(int bufferSize)
 {
     this->bufferSize = bufferSize;
-    shmId = shmget((key_t)0x123465678, bufferSize, IPC_CREAT|0777);
-    if(shmId <= 0)cout << "shmget error:" << errno << endl;
+    shmId = shmget((key_t)0x12345678, bufferSize, IPC_CREAT|0777);
+    if(shmId <= 0)
+    {
+        cout << "shmget error:" << errno << endl;
+        return -1;
+    }
+
     buffer = shmat(shmId, NULL, 0);
-    if(buffer == NULL)cout << "shmat error" << endl;
+    if(buffer == NULL)
+    {
+        cout << "shmat error" << endl;
+        return -1;
+    }
 
-    head = new (buffer) atomic<int>;
-    tail = new (buffer + ATOMIC_INT_SIZE) atomic<int>;
+    inited = (atomic<int>*)buffer;
+    int initedValue = inited->load();
+    cout << "init:" << initedValue << endl;
+    if(initedValue == 0)
+    {
+        bool b = atomic_compare_exchange_strong(inited, &initedValue, 1);
+        if(b)
+        {
+            cout << "get init lock success" << endl;
 
-    //多进程的话这地方明显要改下
-    head->store(0);
-    tail->store(0);
+            head = new (buffer + ATOMIC_INT_SIZE) atomic<int>;
+            tail = new (buffer + 2*ATOMIC_INT_SIZE) atomic<int>;
+            headRead = new (buffer + 3*ATOMIC_INT_SIZE) atomic<int>;
 
-    memset(DATA, 0, DATA_SIZE);
+            head->store(0);
+            tail->store(0);
+            headRead->store(0);
+        }
+    }
+    else
+    {
+        head = (atomic<int>*)(buffer + ATOMIC_INT_SIZE);
+        tail = (atomic<int>*)(buffer + 2*ATOMIC_INT_SIZE);
+        headRead = (atomic<int>*)(buffer + 3*ATOMIC_INT_SIZE);
+    }
+
+    //memset(DATA, 0, DATA_SIZE);
 
     return 0;
 }
 
-//别推满了
-//也搞个断言看看有没有问题
 int LockFreeQueue::push(void* data, int len)
 {
-    ProfilerStart("tmp");
+    //ProfilerStart("tmp");
 
-    //问题来了,核心是要把数据的复制和tail的修改打包原子地完成---这句话总结的蛮不错的嘛
+    //问题来了,核心是要把数据的复制和tail的修改打包原子地完成
     //占位子,把tail处的空间抢到手,就能进行copy
-    int tailValue, tailValueNew, headValue;
+    //int tailValue, tailValueNew, headValue;
+    int tailValue, tailValueNew, headReadValue;
     int casTimes = 0;//查看冲突剧烈程度
 
     do
     {
         ++casTimes;
 
-        //这个步骤可以放到循环外边,但那样cas成功率明显会变低
         tailValue = tail->load();
-        headValue = head->load();
+        //headValue = head->load();
+        headReadValue = headRead->load();//相对head必然滞后,用它判断即可
 
         if(tailValue + 8 > DATA_SIZE)
         {
@@ -84,26 +111,23 @@ int LockFreeQueue::push(void* data, int len)
             tailValueNew = tailValue + 8 + len;
         }
 
-        //cout << tailValue << "|" << len << "|" << DATA_SIZE << "|" << tailValueNew << "|" << headValue << endl;
-
-        //缓冲区满了---这个条件你写的这么简单,可见没有仔细思考
-        //if(tailValueNew >= headValue)
+        //缓冲区满了,记住条件判断
         if( 
             ( 
-                (tailValue < headValue) ||
-                (tailValue > headValue && tailValue + 8 + len > DATA_SIZE) 
+                (tailValue < headReadValue) ||
+                (tailValue > headReadValue && tailValue + 8 + len > DATA_SIZE) 
             )
-            && tailValueNew >= headValue
+            && tailValueNew >= headReadValue
          )
         {
-            cout << "push:" << "buffer is full:" << tailValue << "|" << tailValueNew << "|" << headValue << endl;
+            cout << "push:" << "buffer is full:" << tailValue << "|" << tailValueNew << "|" << headReadValue << endl;
             return -1;
+            //continue;
         }
+        //cout << "after continue" << endl;
 
     }
     while(!atomic_compare_exchange_strong(tail, &tailValue, tailValueNew));
-
-    //cout << "push:" << tailValue << "|" << tailValueNew << endl;
     
     //因为环形缓冲区的问题,所以长度字段确实得确定个大端或者是小端的标准
     //差点写错了,当然要用旧的tail值啊
@@ -126,7 +150,7 @@ int LockFreeQueue::push(void* data, int len)
         *(int*)(DATA + tailValue) = WRITE_OVER_TOKEN;
     }
 
-    ProfilerStop();
+    //ProfilerStop();
     
     return 0;
 }
@@ -134,12 +158,9 @@ int LockFreeQueue::push(void* data, int len)
 int LockFreeQueue::pop(void* data, int& len)
 {
     int headValue, headValueNew, tailValue;
-    int casTimes = 0;
-
+    int headReadValue, headReadValueNew;
     do
     {
-        ++casTimes;
-
         headValue = head->load();
         tailValue = tail->load();
 
@@ -151,22 +172,24 @@ int LockFreeQueue::pop(void* data, int& len)
 
         if(headValue + 8 > DATA_SIZE)
         {
+            //返回还是等?
             if( *(int*)DATA != WRITE_OVER_TOKEN )
             {
                 cout << "pop:" << "write is not over:" << headValue << endl;
                 return -1;
+                //continue;
             }
 
             len = *(int*)(DATA + 4);
             headValueNew = 8 + len;
         }
-        //else if (headValue + 4 + len > DATA_SIZE)---这种问题是怎么出现的...
         else
         {
             if( *(int*)(DATA + headValue) != WRITE_OVER_TOKEN )
             {
                 cout << "pop:" << "write is not over:" << headValue << endl;
                 return -1;
+                //continue;
             }
 
             len = *(int*)(DATA + headValue + 4);
@@ -190,7 +213,6 @@ int LockFreeQueue::pop(void* data, int& len)
     }
     else if (headValue + 8 + len > DATA_SIZE)
     {
-
         memcpy(data, DATA, len);
     }
     else
@@ -198,7 +220,12 @@ int LockFreeQueue::pop(void* data, int& len)
         memcpy(data, DATA + headValue + 8, len);
     }
 
-    cout << "pop:" << headValue << "|" << headValueNew << "|" << string((char*)data, len) << endl;
+    headReadValue = headRead->load();
+    headReadValueNew = headValueNew;
+
+    while(!atomic_compare_exchange_strong(headRead, &headReadValue, headReadValueNew ));
+
+    //cout << "pop:" << headValue << "|" << headValueNew << "|" << string((char*)data, len) << endl;
 
     return 0;
 }

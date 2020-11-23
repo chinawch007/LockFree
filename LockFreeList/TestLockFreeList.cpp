@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "LockFreeList.h"
-#include "LockCache.h"
+#include "ClockCache.h"
 
 using namespace std;
 

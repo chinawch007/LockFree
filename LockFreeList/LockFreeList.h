@@ -82,13 +82,23 @@ class LockFreeList
     //在find返回的内容不能百分百确定准确的情况下要做并发安全的防备
 
     //找到第一个比node的k大的点
+    //pre和n都是要挂hp的
     int find(unsigned long k, Node** node, Node** pre, bool ref = false)
     {
+START:
         Node* p = &dummyHead;
         //此处是否有内存回收风险,n可不能回收啊
         int ret = 0;
         //插入一个节点到空串中,因为这里不检查dummy的值,没啥问题
         Node* n = GET_NEXT_NODE_ADDRESS(p);
+
+        hp->inRef(0, (void*)p);
+        hp->inRef(1, (void*)n);
+        if(GET_NEXT_NODE_ADDRESS(p) != n)
+        {
+            goto START;
+        }
+
         while(n)
         {
             if(!isValid(n))
@@ -100,9 +110,10 @@ class LockFreeList
                 //---没太大意义,你被删节点指向的节点可能也被删除了,想办法对这个指向值做个标识吧,0x1啥的
                 //---其实类似于隔离性的保证就没有了,这么搞这个find是非常SB的
                 //---这种情况下只能用来处理不太严格的需求,我们的每次find要保证有的话一定能找到,插入别重复
-                p = &dummyHead;
-                n = GET_NEXT_NODE_ADDRESS(p);
-                continue;
+                //p = &dummyHead;
+                //n = GET_NEXT_NODE_ADDRESS(p);
+                //continue;
+                goto START;
             }
 
             //之前也想过用cas来做节点移动,铆钉住连接,但问题是cas是原子变量的专属,你一个普通的临时指针变量做不到
@@ -144,6 +155,12 @@ class LockFreeList
 
             p = n;
             n = GET_NEXT_NODE_ADDRESS(p);
+            hp->inRef(0, (void*)p);
+            hp->inRef(1, (void*)n);
+            if(GET_NEXT_NODE_ADDRESS(p) != n)//此处其实可以继续往下走
+            {
+                goto START;
+            }
 
 /*
             //这地方再做一次检查是不是就可以了,如果失效是不是可以认定已经被或者要被删除了,应该要重查
@@ -159,7 +176,6 @@ class LockFreeList
             }
             //再回来看下其实没必要,只要被检查节点处于有效状态就行
 */
-
         }
 
         //没找着比node->key大的
@@ -210,8 +226,8 @@ class LockFreeList
 
     int insert(Node* node, Node* before)
     {
-        hp->inRef(0, (void*)node);//这里node其实是不用挂hp的
-        hp->inRef(1, (void*)before);
+        //hp->inRef(0, (void*)node);//这里node其实是不用挂hp的
+        //hp->inRef(1, (void*)before);
 
         //统一用这个临时变量置换了,node和before都要指向这个,变化了重刷
         void* next;
@@ -287,8 +303,8 @@ class LockFreeList
     //---在上层重试吧---不行,因为invalid要先判断节点是否还有效防止并发删除,你不管了以后会一直失败.
     int remove(Node* node, Node* before)
     {        
-        hp->inRef(0, (void*)node);
-        hp->inRef(1, (void*)before);
+        //hp->inRef(0, (void*)node);
+        //hp->inRef(1, (void*)before);
 
         cout << "thread " << hp->getThreadId() << " remove " << (node->t).k << endl;
 

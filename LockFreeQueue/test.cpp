@@ -5,8 +5,6 @@
 
 #include "LockFreeQueue.h"
 
-//把数调大了特别忐忑
-
 using namespace std;
 
 void pushFunc()
@@ -14,12 +12,12 @@ void pushFunc()
     char bufIn[] = "wangchongaaa";
 
     LockFreeQueue q;
-    q.init(2000000 + 8);
+    q.init(1*1024*1024 + 16);
 
     struct timeval tv1, tv2;
 	gettimeofday(&tv1, NULL);
 
-    for(int i = 0; i < 10000; ++i)
+    for(int i = 0; i < 100000; ++i)
     {
         q.push(bufIn, 12);
     }
@@ -27,6 +25,7 @@ void pushFunc()
     gettimeofday(&tv2, NULL);
 
     cout << "push cost:" << (tv2.tv_sec - tv1.tv_sec) * 1000000 + (tv2.tv_usec - tv1.tv_usec) << endl;
+    
 }
 
 void popFunc()
@@ -35,7 +34,8 @@ void popFunc()
     int len;
 
     LockFreeQueue q;
-    q.init(2000000 + 8);
+    q.init(1*1024*1024 + 16);
+
 
     struct timeval tv1, tv2;
 	gettimeofday(&tv1, NULL);
@@ -48,6 +48,7 @@ void popFunc()
     gettimeofday(&tv2, NULL);
 
     cout << "pop cost:" << (tv2.tv_sec - tv1.tv_sec) * 1000000 + (tv2.tv_usec - tv1.tv_usec) << endl;
+    
 }
 
 void processFunc()
